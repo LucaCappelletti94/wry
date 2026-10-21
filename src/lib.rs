@@ -1172,6 +1172,8 @@ impl<'a> WebViewBuilder<'a> {
   /// ## Platform-specific
   ///
   /// - **Linux / Android**: The request URL is not supported on iframes and the main frame URL is used instead.
+  /// - **Android**: The handler runs on the thread that built the webview, which must be a non-UI thread whose looper is polled, as in `tao`'s event loop.
+  ///   Otherwise building the webview fails with `Error::AndroidIpcRequiresOwnerLooper`.
   pub fn with_ipc_handler<F>(mut self, handler: F) -> Self
   where
     F: Fn(Request<String>) + 'static,

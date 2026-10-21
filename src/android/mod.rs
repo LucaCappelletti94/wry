@@ -25,6 +25,7 @@ use std::{
 };
 
 pub(crate) mod binding;
+mod ipc;
 mod main_pipe;
 use main_pipe::{
   ActivityId, CreateWebViewAttributes, MainPipe, WebViewMessage, activity_id_for_window_manager,
@@ -68,7 +69,6 @@ macro_rules! define_static_handlers {
 }
 
 define_static_handlers! {
-  IPC = UnsafeIpc { handler: Box<dyn Fn(Request<String>)> };
   REQUEST_HANDLER = UnsafeRequestHandler { handler: Arc<dyn Fn(&str, Request<Vec<u8>>, bool) -> Option<HttpResponse<Cow<'static, [u8]>>> + Send + Sync> };
   TITLE_CHANGE_HANDLER = UnsafeTitleHandler { handler: Box<dyn Fn(String)> };
   URL_LOADING_OVERRIDE = UnsafeUrlLoadingOverride { handler: Box<dyn Fn(String) -> bool> };
@@ -89,7 +89,7 @@ static EVAL_CALLBACKS: OnceLock<Mutex<HashMap<i32, EvalCallback>>> = OnceLock::n
 
 pub fn destroy_webview(activity_id: ActivityId, webview_id: &WebviewId) {
   WEBVIEW_ATTRIBUTES.lock().unwrap().remove(&activity_id);
-  IPC.lock().unwrap().remove(webview_id);
+  ipc::destroy(webview_id);
   REQUEST_HANDLER.lock().unwrap().remove(webview_id);
   TITLE_CHANGE_HANDLER.lock().unwrap().remove(webview_id);
   URL_LOADING_OVERRIDE.lock().unwrap().remove(webview_id);
@@ -145,6 +145,37 @@ pub unsafe fn android_setup(
       WebViewMessage::CreateWebView(webview_attributes.clone()),
     );
   }
+}
+
+fn ipc_looper(activity_id: ActivityId) -> Result<ThreadLooper> {
+  let looper = ThreadLooper::for_thread().ok_or(Error::AndroidIpcRequiresOwnerLooper)?;
+  let activity = main_pipe::activity_proxy(activity_id).ok_or(Error::ActivityNotFound)?;
+  // SAFETY: Activity proxies retain the process VM supplied by `android_setup`.
+  let vm = unsafe { jni::JavaVM::from_raw(activity.java_vm.cast()) }?;
+  let mut env = vm.attach_current_thread_as_daemon()?;
+  let is_main = env.with_local_frame(4, |env| {
+    let current = env
+      .call_static_method(
+        "android/os/Looper",
+        "myLooper",
+        "()Landroid/os/Looper;",
+        &[],
+      )?
+      .l()?;
+    let main = env
+      .call_static_method(
+        "android/os/Looper",
+        "getMainLooper",
+        "()Landroid/os/Looper;",
+        &[],
+      )?
+      .l()?;
+    env.is_same_object(current, main)
+  })?;
+  if is_main {
+    return Err(Error::AndroidIpcRequiresOwnerLooper);
+  }
+  Ok(looper)
 }
 
 pub(crate) struct InnerWebView {
@@ -217,6 +248,10 @@ impl InnerWebView {
       .map(|id| id.to_string())
       .unwrap_or_else(|| COUNTER.next().to_string());
 
+    if let Some(handler) = ipc_handler {
+      ipc::register(&id, &ipc_looper(activity_id)?, handler)?;
+    }
+
     if let Some(domain) = asset_loader_domain {
       ASSET_LOADER_DOMAIN
         .lock()
@@ -270,13 +305,6 @@ impl InnerWebView {
         },
       )),
     );
-
-    if let Some(i) = ipc_handler {
-      IPC
-        .lock()
-        .unwrap()
-        .insert(id.clone(), UnsafeIpc::new(Box::new(i)));
-    }
 
     if let Some(i) = attributes.document_title_changed_handler {
       TITLE_CHANGE_HANDLER
@@ -542,4 +570,25 @@ where
     first_activity_id().expect("no available activity"),
     WebViewMessage::Jni(Box::new(func)),
   );
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn ipc_rejects_a_thread_without_a_looper() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+      let rejected = matches!(
+        ipc_looper(i32::MIN),
+        Err(Error::AndroidIpcRequiresOwnerLooper)
+      );
+      tx.send(("missing-ipc-looper", rejected)).unwrap();
+    });
+    let (request, rejected) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    worker.join().unwrap();
+    assert_eq!(request, "missing-ipc-looper");
+    assert!(rejected);
+  }
 }

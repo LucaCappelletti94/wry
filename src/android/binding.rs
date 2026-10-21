@@ -17,7 +17,7 @@ use ndk::looper::{FdEvent, ThreadLooper};
 use std::os::fd::{AsFd, AsRawFd};
 
 use super::{
-  ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, IPC, ON_LOAD_HANDLER, PERMISSION_HANDLER, REQUEST_HANDLER,
+  ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, ON_LOAD_HANDLER, PERMISSION_HANDLER, REQUEST_HANDLER,
   TITLE_CHANGE_HANDLER, URL_LOADING_OVERRIDE,
   main_pipe::{MAIN_PIPE, MainPipe},
 };
@@ -404,19 +404,19 @@ pub unsafe fn ipc(mut env: JNIEnv, _: JClass, webview_id: JString, url: JString,
     env.get_string(&webview_id),
   ) {
     (Ok(url), Ok(body), Ok(webview_id)) => {
-      #[cfg(feature = "tracing")]
-      let _span = tracing::info_span!(parent: None, "wry::ipc::handle").entered();
-
       let url = url.to_string_lossy().to_string();
       let body = body.to_string_lossy().to_string();
       let webview_id = webview_id.to_string_lossy().to_string();
-      if let Some(ipc) = IPC.lock().unwrap().get(&webview_id) {
-        match Request::builder().uri(url).body(body) {
-          Ok(request) => (ipc.handler)(request),
-          Err(_error) => {
+      match Request::builder().uri(url).body(body) {
+        Ok(request) => {
+          if let Err(_error) = super::ipc::dispatch(&webview_id, request) {
             #[cfg(feature = "tracing")]
-            tracing::warn!("WebView received invalid IPC request: {_error}")
+            tracing::warn!("Failed to dispatch IPC request: {_error}");
           }
+        }
+        Err(_error) => {
+          #[cfg(feature = "tracing")]
+          tracing::warn!("WebView received invalid IPC request: {_error}")
         }
       }
     }

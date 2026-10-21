@@ -79,4 +79,7 @@ pub enum Error {
   #[cfg(target_os = "android")]
   #[error("Activity not found")]
   ActivityNotFound,
+  #[cfg(target_os = "android")]
+  #[error("Android IPC requires a non-UI creating thread with a polled Android looper")]
+  AndroidIpcRequiresOwnerLooper,
 }
